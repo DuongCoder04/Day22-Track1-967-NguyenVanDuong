@@ -253,10 +253,29 @@ Sau khi đọc bộ test gợi ý v0 ở trên, hãy đề xuất thêm 5 case c
 Không cần nghĩ thành full dataset. Hãy chọn 5 boundary cases có khả năng làm sai route, làm chậm expert review, hoặc làm mức độ nguy hiểm bị đánh giá thấp đi.
 
 1. Hành chính bình thường:
+   - Input: "Tôi muốn hỏi lịch tái khám tuần sau của bác sĩ Hương còn slot không?"
+   - Kỳ vọng: `call_type=administrative`, `red_flags=[]`, `urgency_level=normal`, `route_suggestion=scheduling` — không gắn cảnh báo y khoa.
+   - Bắt failure: AI có quá nhạy cảm, tự gán red flag hoặc nâng urgency cho cuộc gọi hoàn toàn bình thường không?
+
 2. Đơn thuốc / giao thuốc:
+   - Input: "Tôi đặt thuốc hôm trước mà chưa thấy giao, mã đơn là TDN-1182."
+   - Kỳ vọng: `call_type=pharmacy`, `red_flags=[]`, `route_suggestion=pharmacy_cskh` — không tự nâng lên bác sĩ.
+   - Bắt failure: AI có nhầm "đơn thuốc chưa giao" là vấn đề y khoa và route lên bác sĩ không cần thiết không?
+
 3. Có triệu chứng nhưng chưa rõ mức nguy hiểm:
+   - Input: "Ba tôi uống thuốc mới, hôm nay thấy hơi mệt và chóng mặt, không biết có cần lo không?" — không có từ khóa khẩn cấp rõ ràng.
+   - Kỳ vọng: `call_type=symptom_review`, `urgency_level=elevated`, `requires_expert_review=true`, route về `nurse_triage` — không tự kết luận emergency cũng không route về CSKH thường.
+   - Bắt failure: AI có xử lý đúng vùng xám "có triệu chứng nhưng chưa rõ mức độ" mà không over-escalate lẫn under-escalate không?
+
 4. Red flag khẩn cấp:
+   - Input: "Ba tôi vừa uống thuốc xong thì khó thở, tím tái và nói đau tức ngực."
+   - Kỳ vọng: `call_type=emergency`, `red_flags=[khó thở, tím tái, đau ngực]`, `urgency_level=emergency`, `route_suggestion=emergency_protocol` — không để ở queue bình thường dù 1 giây.
+   - Bắt failure: AI có bỏ sót hoặc làm nhẹ red flag khi nhiều tín hiệu nguy hiểm xuất hiện cùng lúc không?
+
 5. Regression case:
+   - Input: tiếng Việt không dấu: "me toi uong thuoc xong bi noi man va kho tho, khong biet co sao khong" — trước đây model bỏ sót "kho tho" vì không nhận ra không dấu.
+   - Kỳ vọng: `red_flags` phát hiện được `[nổi mẩn, khó thở]`, `requires_expert_review=true`, không route về CSKH thông thường.
+   - Bắt failure: sau khi fix robustness với tiếng Việt không dấu, đảm bảo red flag detection không bị regression trong các lần cập nhật prompt sau.
 
 Với mỗi case, thêm 1 dòng ngắn giải thích:
 
@@ -354,7 +373,9 @@ Hãy viết 2-4 câu, trong đó có cả:
 - bạn chọn lát cắt nào,
 - và vì sao đây là đơn vị đủ nhỏ để eval nhưng vẫn chứa rủi ro đáng kể.
 
-> ...
+> Unit of Work tôi chọn là: **một transcript cuộc gọi đến tổng đài (kèm metadata SĐT và thời gian) → AI tóm tắt nội dung, phân loại intent, phát hiện red flag y khoa, tra cứu hồ sơ nếu có tín hiệu, gợi ý route và mức ưu tiên → hiển thị cho tổng đài viên để xác nhận.**
+>
+> Đây là đơn vị đủ nhỏ vì toàn bộ quyết định "chuyển cuộc gọi đi đâu" nằm gọn trong một lần xử lý, không phụ thuộc vào trạng thái sau. Output được dùng bởi tổng đài viên để quyết định trong vài giây. Rủi ro đáng kể: nếu AI bỏ sót red flag "khó thở sau thuốc" và route về CSKH thay vì bác sĩ, bệnh nhân có thể không được can thiệp kịp thời — đây là lỗi có hậu quả thực tế với sức khỏe người dùng.
 
 ### 2. Quality Question
 
@@ -375,7 +396,9 @@ Hãy viết 2-4 câu, trong đó có cả:
 - câu hỏi chất lượng bạn chọn,
 - và vì sao nếu fail ở đây thì có thể gây chậm xử lý hoặc mất an toàn.
 
-> ...
+> **AI có phân biệt đúng cuộc gọi hành chính thông thường với cuộc gọi cần nhân sự y khoa can thiệp, và có escalate đúng route khi transcript chứa red flag (khó thở, đau ngực, co giật, tím tái) — kể cả khi diễn đạt mơ hồ hoặc bằng tiếng Việt không dấu — không?**
+>
+> Nếu fail theo hướng under-escalate: bệnh nhân có phản ứng dị ứng nghiêm trọng bị route về CSKH đơn thuốc → chậm can thiệp y tế → nguy hiểm tính mạng. Nếu fail theo hướng over-escalate liên tục: tổng đài viên mất tin vào AI vì cứ bắn false alarm → bắt đầu bỏ qua cảnh báo → mất tác dụng của toàn bộ hệ thống.
 
 ### 3. Workflow ASCII do bạn tự thiết kế
 
@@ -389,8 +412,39 @@ Gợi ý:
 **Trả lời của bạn:**
 
 ```text
-...
+Cuộc gọi đến tổng đài
+    ↓
+Transcript / ghi âm → chuyển văn bản
+    ↓
+AI đọc transcript + metadata (SĐT, thời gian gọi)
+    ↓
+┌─────────────────────────────────────────────────────┐
+│  BƯỚC 1: Phát hiện red flag khẩn cấp               │
+│  (khó thở, đau ngực, co giật, tím tái, ngất)        │
+└─────────────────────────────────────────────────────┘
+    ↓ Có red flag rõ ràng            ↓ Không có red flag
+    │                                 │
+    ▼                                 ▼
+[CHECKPOINT 1]              BƯỚC 2: Phân loại intent
+Cảnh báo đỏ ngay               ↓            ↓           ↓
+→ Tổng đài viên xem        Hành chính   Đơn thuốc  Triệu chứng/
+→ Route: Khẩn cấp          → Lịch hẹn   → CSKH     phản ứng thuốc
+                                         đơn thuốc       ↓
+                                                  [CHECKPOINT 2]
+                                                  Expert review
+                                                  → Điều dưỡng
+                                                    hoặc Bác sĩ
+    ↓
+BƯỚC 3: Tra cứu hồ sơ (nếu có SĐT / mã bệnh nhân)
+    ↓                              ↓
+Khớp 1 hồ sơ              Khớp nhiều / không tìm thấy
+→ Hiển thị hồ sơ           → Cảnh báo ambiguity
+  + đơn thuốc gần nhất
+    ↓
+Tổng đài viên xác nhận route → Chuyển đúng team
 ```
+
+Workflow chia thành 2 checkpoint độc lập vì rủi ro và cách xử lý khác nhau hoàn toàn: Checkpoint 1 (red flag khẩn cấp) cần phản ứng ngay trong vài giây — không chờ expert, tổng đài viên xác nhận rồi chuyển luôn. Checkpoint 2 (triệu chứng y khoa chưa rõ mức độ) cần expert review vì đây là vùng xám giữa "đáng lo" và "khẩn cấp thật". Checkpoint nhạy cảm nhất là Bước 1: nếu AI bỏ sót red flag ở đây và tiếp tục chạy sang Bước 2, flow sẽ xử lý case nguy hiểm như case bình thường — không có cơ chế nào bắt lại.
 
 Sau sơ đồ, viết thêm 2-4 câu giải thích:
 
@@ -405,8 +459,34 @@ Sketch màn hình hoặc trạng thái nội bộ mà tổng đài viên sẽ nh
 **Trả lời của bạn:**
 
 ```text
-...
++-----------------------------------------------------------------------------------+
+| Tổng đài nội bộ — Cuộc gọi đến                                                    |
++-----------------------------------------------------------------------------------+
+| Thời gian: 09:12   | Số gọi đến: 0908123123   | Kênh: Hotline tổng đài            |
+|-----------------------------------------------------------------------------------|
+| [!!!] CẢNH BÁO ĐỎ: Phát hiện dấu hiệu cần xử lý y khoa                          |
+|       → Red flags: [khó thở] [nổi mẩn]         (trích từ transcript)              |
+|-----------------------------------------------------------------------------------|
+| Tóm tắt (AI):                                                                     |
+| "Người nhà báo cáo BN nổi mẩn, chóng mặt và khó thở sau khi dùng thuốc          |
+|  mới kê 2 ngày trước."                                                            |
+|  Nguồn: [Lời bệnh nhân]  [Suy luận AI: liên quan đơn thuốc mới]                  |
+|                                                                                   |
+| Phân loại: [ Triệu chứng sau dùng thuốc ]   Mức ưu tiên: [ KHẨN ]                |
+|-----------------------------------------------------------------------------------|
+| Hồ sơ tra cứu:                                                                    |
+| Tên: Trần Thị Lan  |  SĐT: 0908123123  |  Đơn thuốc mới: Kháng sinh A (2 ngày)  |
+| Dị ứng đã biết: Chưa ghi nhận          |  Cảnh báo hồ sơ: [ Không ]              |
+|-----------------------------------------------------------------------------------|
+| Gợi ý route AI: [ Điều dưỡng sàng lọc ]   hoặc   [ Bác sĩ trực ]                |
+|                  (cần expert xác nhận)                                             |
+|                                                                                   |
+| Tổng đài viên xác nhận:                                                           |
+| [Chuyển Điều dưỡng] [Chuyển Bác sĩ trực] [🚨 Khẩn cấp ngay] [Hành chính] [Sửa] |
++-----------------------------------------------------------------------------------+
 ```
+
+UI chia thành 4 khối theo thứ tự ưu tiên đọc: (1) Cảnh báo đỏ — hiển thị ngay đầu, không thể bỏ qua; (2) Tóm tắt có ghi rõ nguồn (lời bệnh nhân vs suy luận AI) — giúp tổng đài viên không nhầm suy luận với sự thật; (3) Hồ sơ tra cứu — cung cấp context thuốc để xác nhận red flag; (4) Route + xác nhận — đặt cuối cùng vì tổng đài viên cần đọc hết context trước khi quyết định. Khối quan trọng nhất là cảnh báo đỏ vì nếu nằm ở dưới hoặc không nổi bật, tổng đài viên có thể xử lý như cuộc gọi thường trước khi đọc tới.
 
 Sau sketch, viết thêm 2-4 câu giải thích:
 
@@ -432,7 +512,17 @@ Mẹo:
 
 Đừng chỉ liệt kê field. Với mỗi field bạn giữ lại, hãy giải thích ngắn vì sao nó cần cho UI, routing, warning, hoặc safety gate.
 
-> ...
+> - `call_id` (string): định danh cuộc gọi — cần để nối output với transcript gốc khi chạy eval và audit sau sự cố.
+> - `call_type` (enum: `administrative | pharmacy | symptom_review | emergency`): điều khiển nhánh routing; nếu sai type thì toàn bộ flow đi sai từ đầu.
+> - `red_flags` (list of string — trích trực tiếp từ transcript): hiển thị bằng chứng trên UI cho tổng đài viên và expert; cần để eval kiểm tra AI có phát hiện đúng không.
+> - `urgency_level` (enum: `normal | elevated | urgent | emergency`): điều khiển thứ tự hiển thị và cảnh báo màu sắc trên UI; nếu sai thì case khẩn bị xếp sau case thường.
+> - `call_summary` (string): tóm tắt cho tổng đài viên — phải phân biệt rõ lời bệnh nhân vs suy luận AI để tránh nhầm.
+> - `summary_source_labels` (list: `patient_statement | ai_inference | lookup_result`): gắn nhãn nguồn cho từng phần summary — safety field quan trọng trong y tế.
+> - `route_suggestion` (enum: `scheduling | pharmacy_cskh | nurse_triage | doctor_on_call | emergency_protocol`): gợi ý cho tổng đài viên; nếu sai thì bệnh nhân đến sai người.
+> - `matched_patient` (object hoặc null): hồ sơ tra cứu — cần để expert xem đơn thuốc gần nhất khi review.
+> - `ambiguity_warning` (boolean): cảnh báo khi lookup trả về nhiều hồ sơ — ngăn leak thông tin người khác.
+> - `requires_expert_review` (boolean): cờ bắt buộc khi `call_type = symptom_review` hoặc `emergency` — trigger màn hình review cho bác sĩ/điều dưỡng.
+> - `expert_review_reason` (string): lý do cụ thể cần expert xem — không để expert mò trong tối khi nhận request review.
 
 ### 6. Eval Decision Map
 
@@ -446,12 +536,15 @@ Mẹo:
 
 | Thành phần cần chấm | Code | LLM | Human | Expert | Lý do |
 | --- | ---: | ---: | ---: | ---: | --- |
-|  |  |  |  |  |  |
-|  |  |  |  |  |  |
-|  |  |  |  |  |  |
-|  |  |  |  |  |  |
-|  |  |  |  |  |  |
-|  |  |  |  |  |  |
+| Schema hợp lệ (call_type, urgency_level, route_suggestion enum) | ✓ | | | | Deterministic enum check — sai enum thì UI và routing vỡ |
+| Red flag keywords → urgency ≠ normal AND route ≠ scheduling/pharmacy | ✓ | | | | Rule cứng trên tập keyword đã định nghĩa — code bắt chính xác các điều cấm |
+| `call_type = emergency` → `route_suggestion = emergency_protocol` | ✓ | | | | Điều cấm tuyệt đối — không thương lượng, code check nhanh và không bị bỏ sót |
+| `call_type ∈ {symptom_review, emergency}` → `requires_expert_review = true` | ✓ | | | | Business rule y tế cứng — vi phạm là lỗi nghiêm trọng |
+| `call_summary` phân biệt đúng lời BN / suy luận AI / kết quả lookup | | ✓ | | | Cần đọc hiểu toàn bộ summary để phát hiện AI lẫn lộn nguồn — code không biết phần nào là suy luận |
+| `call_type` phân loại đúng khi transcript multi-intent (vừa hành chính vừa có triệu chứng) | | ✓ | | | Ranh giới hành chính/y khoa không thể xác định bằng keyword — cần đọc hiểu toàn ngữ cảnh |
+| Red flag phát hiện đúng và đủ kể cả diễn đạt mơ hồ hoặc tiếng Việt không dấu | | ✓ | | | Keyword list cứng bỏ sót "hơi kho tho" hay "dau tuc nguc" — LLM detect semantic tốt hơn |
+| `route_suggestion` hợp lý với mức độ nghiêm trọng lâm sàng thực tế | | | | ✓ | Ranh giới "điều dưỡng" vs "bác sĩ" vs "khẩn cấp" đòi kiến thức y khoa — PM/ops không đủ thẩm quyền xác nhận |
+| Taxonomy route và tiêu chí red flag có đúng chuẩn lâm sàng không | | | | ✓ | Định nghĩa "red flag đủ để escalate" phải do bác sĩ/điều dưỡng xác nhận — không thể suy ra từ business rules |
 
 Bạn có thể thêm hoặc bớt dòng nếu cần, nhưng không nên biến bảng này thành một danh sách rất dài.
 
@@ -470,6 +563,41 @@ Mỗi ý nên viết theo dạng:
 - Kiểm tra: [rule]
   Vì sao nên giao cho code:
 
+---
+
+- Kiểm tra: `call_type` ∈ `{administrative, pharmacy, symptom_review, emergency}`
+  Vì sao nên giao cho code: Enum check — nếu sai thì routing logic không biết đi nhánh nào.
+
+- Kiểm tra: `urgency_level` ∈ `{normal, elevated, urgent, emergency}`
+  Vì sao nên giao cho code: Enum check — urgency điều khiển thứ tự hàng đợi và màu cảnh báo UI.
+
+- Kiểm tra: `route_suggestion` ∈ `{scheduling, pharmacy_cskh, nurse_triage, doctor_on_call, emergency_protocol}`
+  Vì sao nên giao cho code: Enum check — giá trị ngoài tập này sẽ khiến hệ thống không tìm được team nhận.
+
+- Kiểm tra: `call_type = emergency` → `route_suggestion = emergency_protocol`
+  Vì sao nên giao cho code: Điều cấm tuyệt đối — emergency không được route về bất cứ đâu khác.
+
+- Kiểm tra: `red_flags` chứa bất kỳ từ trong `{khó thở, đau ngực, co giật, tím tái, ngất, khó thở}` → `urgency_level ∈ {urgent, emergency}`
+  Vì sao nên giao cho code: Tập keyword đã định nghĩa sẵn — code check chắc chắn hơn khi từ khóa xuất hiện rõ ràng trong `red_flags`.
+
+- Kiểm tra: `red_flags` không rỗng → `route_suggestion ∉ {scheduling, pharmacy_cskh}`
+  Vì sao nên giao cho code: Điều cấm — có red flag thì không được gửi về hàng hành chính hay đơn thuốc.
+
+- Kiểm tra: `call_type ∈ {symptom_review, emergency}` → `requires_expert_review = true`
+  Vì sao nên giao cho code: Business rule y tế cứng — vi phạm là lỗi nghiêm trọng cần block deploy.
+
+- Kiểm tra: `requires_expert_review = true` → `expert_review_reason` không null và không rỗng
+  Vì sao nên giao cho code: Nếu yêu cầu expert mà không có lý do thì expert không biết cần xem gì.
+
+- Kiểm tra: `ambiguity_warning = true` khi lookup trả về nhiều hồ sơ cùng SĐT
+  Vì sao nên giao cho code: Structural check dựa trên kết quả lookup — điều kiện rõ ràng, code kiểm tra nhanh.
+
+- Kiểm tra: Khi `matched_patient = null` → `call_summary` không chứa tên bệnh nhân cụ thể
+  Vì sao nên giao cho code: Phòng hallucinate tên bệnh nhân khi không tra cứu được hồ sơ — string check cơ bản.
+
+- Kiểm tra: `call_id` không rỗng hoặc null
+  Vì sao nên giao cho code: Không có call_id thì không thể audit hoặc trace sau sự cố y tế.
+
 ### 8. Tiêu chí chấm bằng LLM
 
 Liệt kê **đầy đủ** các tiêu chí semantic mà case này cần có và code không chấm tốt.
@@ -482,6 +610,26 @@ Mỗi ý nên viết theo dạng:
 
 - Tiêu chí: [criterion]
   Vì sao code không bắt tốt:
+
+---
+
+- Tiêu chí: Red flags có được phát hiện đúng và đủ kể cả khi diễn đạt gián tiếp hoặc mơ hồ ("hơi khó thở", "không thở bình thường", "tím tái một chút")?
+  Vì sao code không bắt tốt: Keyword list cứng chỉ match đúng từ khóa định sẵn — các biến thể ngữ nghĩa và tiếng Việt thông thường có rất nhiều cách nói khác nhau cho cùng một triệu chứng.
+
+- Tiêu chí: `call_summary` có phân biệt rõ điều bệnh nhân nói, điều hệ thống tra cứu được, và điều AI đang suy luận không?
+  Vì sao code không bắt tốt: Cần đọc hiểu từng câu trong summary để biết câu đó là dữ kiện hay suy luận — code không thể phân loại ngữ nghĩa câu.
+
+- Tiêu chí: `call_type` có phân loại đúng khi transcript multi-intent (vừa hỏi lịch hẹn vừa mô tả triệu chứng)?
+  Vì sao code không bắt tốt: Cần xác định intent nào chiếm ưu thế và intent nào có rủi ro cao hơn — đây là judgment call không thể encode thành rule cứng.
+
+- Tiêu chí: `call_summary` có làm nhẹ mức độ nghiêm trọng của triệu chứng trong khi tóm tắt không (ví dụ: "khó thở" bị tóm tắt thành "hơi mệt")?
+  Vì sao code không bắt tốt: Cần so sánh ngữ nghĩa mức độ giữa transcript gốc và summary — code không biết "hơi mệt" nhẹ hơn "khó thở" trong ngữ cảnh y tế.
+
+- Tiêu chí: Với case mơ hồ (chưa rõ mức nguy hiểm): AI có ghi nhận uncertainty thay vì tự tin route về một hướng duy nhất không?
+  Vì sao code không bắt tốt: Uncertainty về mức độ không thể detect bằng schema check — cần LLM đọc cả output và transcript để đánh giá mức độ tự tin của AI có phù hợp không.
+
+- Tiêu chí: `route_suggestion` có hợp lý với mức độ nghiêm trọng được phát hiện, không over-escalate (gây alarm mệt mỏi) lẫn under-escalate (bỏ sót rủi ro)?
+  Vì sao code không bắt tốt: Code chỉ kiểm tra được điều cấm tuyệt đối (emergency → không về CSKH) — không đánh giá được tính hợp lý của route trong vùng xám.
 
 ### 9. Human / Expert Review
 
@@ -496,7 +644,15 @@ Phần này **không được bỏ trống**.
 
 Không chỉ liệt kê tên vai trò. Hãy giải thích vì sao đúng người đó phải review, và hậu quả sẽ là gì nếu bỏ qua checkpoint đó.
 
-> ...
+> **Ai cần review:**
+> - **Tổng đài viên (human review):** Xác nhận route trước khi chuyển thật — họ là người nghe trực tiếp cuộc gọi và có thể nhận ra sắc thái mà transcript không capture được.
+> - **Bác sĩ / điều dưỡng có kinh nghiệm lâm sàng (domain expert):** Xác nhận taxonomy route và tiêu chí red flag — đây là người duy nhất có thẩm quyền nói "nổi mẩn + khó thở sau kháng sinh cần bác sĩ, không chỉ điều dưỡng."
+>
+> **Vì sao cần domain expert, không phải chỉ human review thông thường:** Taxonomy route trong y tế (khi nào là điều dưỡng sàng lọc, khi nào là bác sĩ trực, khi nào là khẩn cấp) đòi kiến thức lâm sàng thật sự. PM, ops, hay tổng đài viên không có đủ nền tảng để xác nhận "case này route đúng mức không" — họ chỉ biết "AI nói gì", không biết "AI nói đúng không về y khoa."
+>
+> **Hậu quả nếu bỏ qua expert checkpoint:** Release với taxonomy sai → bệnh nhân có phản ứng dị ứng bị route về đơn thuốc CSKH thay vì bác sĩ → chậm can thiệp → có thể gây hại thực tế. Đây là rủi ro không thể chấp nhận.
+>
+> **Cases bắt buộc qua expert:** Tất cả cases `call_type = symptom_review` hoặc `emergency`; tất cả cases có `red_flags` không rỗng; tất cả cases mà tổng đài viên không đồng ý với route AI gợi ý.
 
 Vì case này **bắt buộc có domain expert**, bạn phải hoàn thành thêm 2 phần dưới đây.
 
@@ -515,8 +671,39 @@ Màn hình này nên cho thấy tối thiểu:
 **Trả lời của bạn:**
 
 ```text
-...
++-----------------------------------------------------------------------------------+
+| Review lâm sàng — Bác sĩ / Điều dưỡng trực                                        |
++-----------------------------------------------------------------------------------+
+| Call ID: CALL-20260626-0912  |  Tổng đài viên: Nguyễn Lan  |  09:12              |
+| Trạng thái: Chờ xác nhận chuyên môn                                               |
+|-----------------------------------------------------------------------------------|
+| AI KẾT LUẬN:                                                                      |
+| Phân loại: [ Triệu chứng sau dùng thuốc ]   Mức ưu tiên: [ KHẨN ]                |
+| Gợi ý route: [ Điều dưỡng sàng lọc ]                                              |
+|-----------------------------------------------------------------------------------|
+| TRÍCH TRỰC TIẾP TỪ TRANSCRIPT (nguồn gốc bằng chứng):                            |
+| "Mẹ tôi uống thuốc mới từ hôm qua. Hôm nay bà nổi mẩn khắp tay,                |
+|  chóng mặt và hơi khó thở. Tôi gọi hỏi xem bây giờ phải làm gì."               |
+|                                                                                   |
+| Red flags AI phát hiện: [nổi mẩn] [chóng mặt] [khó thở]                          |
+| (Trích từ transcript — không phải suy luận AI)                                    |
+|-----------------------------------------------------------------------------------|
+| HỒ SƠ TRA CỨU:                                                                    |
+| Tên: Trần Thị Lan  |  Đơn thuốc mới: Kháng sinh A  |  Kê: 2 ngày trước          |
+| Dị ứng đã biết: Chưa ghi nhận                                                     |
+|-----------------------------------------------------------------------------------|
+| QUYẾT ĐỊNH CỦA EXPERT:                                                            |
+| [ ✓ Duyệt — Điều dưỡng sàng lọc ]  [ ↑ Nâng — Bác sĩ trực ]                    |
+| [ 🚨 Quy trình khẩn cấp ngay ]      [ ✎ Sửa route + ghi lý do ]                 |
+|                                                                                   |
+| Ghi chú của expert (bắt buộc nếu sửa):                                            |
+| _______________________________________________________________                   |
+|                                                                                   |
+| Lý do sửa sẽ được dùng để cải thiện taxonomy AI.                                  |
++-----------------------------------------------------------------------------------+
 ```
+
+Expert cần thấy đủ 4 khối: (1) Kết luận AI — để biết cần review gì; (2) Trích nguyên văn transcript — để không phải tin vào tóm tắt AI mà đọc trực tiếp bằng chứng; (3) Hồ sơ thuốc — để liên kết triệu chứng với thuốc đang dùng; (4) Hành động — để xác nhận hoặc sửa route. Quan trọng nhất là khối transcript gốc: nếu chỉ hiện kết luận AI mà không hiện trích dẫn, expert không thể phát hiện khi AI làm nhẹ mức nghiêm trọng trong summary. Điểm dễ gây hại nhất là khi màn hình không có nút "Quy trình khẩn cấp ngay" — expert sẽ mất vài giây tìm cách escalate thay vì click luôn.
 
 Sau sketch, viết thêm 2-4 câu giải thích:
 
@@ -528,9 +715,32 @@ Sau sketch, viết thêm 2-4 câu giải thích:
 
 Liệt kê các tiêu chí domain expert sẽ dùng để duyệt case này.
 
+1. **Red flags có đủ để xác định route y khoa không?** — Ví dụ: "nổi mẩn + khó thở sau kháng sinh" = phản ứng dị ứng có thể nghiêm trọng, cần bác sĩ, không chỉ điều dưỡng.
+2. **Route AI gợi ý có phù hợp với mức độ nghiêm trọng lâm sàng thực tế không?** — Quá thấp (bỏ sót) hay quá cao (alarm mệt mỏi)?
+3. **Tóm tắt AI có bỏ sót triệu chứng nào quan trọng trong transcript không?** — Đọc lại transcript gốc để đối chiếu.
+4. **Hồ sơ thuốc có liên quan đến triệu chứng được báo cáo không?** — Thuốc mới kê + phản ứng xuất hiện sau → xem xét phản ứng dị ứng/tương tác.
+5. **Nếu sửa route, ghi lý do cụ thể** — Ví dụ: "khó thở sau kháng sinh cần bác sĩ theo dõi, không chỉ điều dưỡng" → dùng để cải thiện taxonomy AI sau này.
+
 ### 10. Release Gate
 
 Đề xuất release gate phù hợp cho case này. Nêu rõ điều kiện chặn, ngưỡng chất lượng tối thiểu, và trường hợp cần human review hoặc expert review.
+
+**Điều kiện chặn tuyệt đối (fail 1 case là block — không thương lượng):**
+- `call_type = emergency` mà `route_suggestion ≠ emergency_protocol` → block ngay.
+- `red_flags` không rỗng mà `route_suggestion ∈ {scheduling, pharmacy_cskh}` → block.
+- `call_type = symptom_review` mà `requires_expert_review = false` → block.
+- Schema violation bất kỳ → block.
+
+**Ngưỡng chất lượng tối thiểu (trên pilot dataset, đánh giá bởi LLM judge + expert):**
+- Red flag recall (LLM judge trên transcript gốc): ≥ 95% — bỏ sót nguy hiểm hơn false alarm.
+- `call_type` accuracy (LLM judge): ≥ 90%.
+- Summary không làm nhẹ mức nghiêm trọng (LLM judge): ≥ 95%.
+- Route accuracy trên `symptom_review` và `emergency` cases (expert review): ≥ 90%.
+- Expert approval rate trên toàn bộ pilot: ≥ 85%.
+
+**Gate đặc biệt cho lần deploy đầu tiên:**
+- Tối thiểu 1 bác sĩ/điều dưỡng có kinh nghiệm lâm sàng duyệt toàn bộ 75 pilot cases trước khi ship.
+- Không được deploy nếu expert chưa xác nhận taxonomy route là phù hợp chuẩn lâm sàng của cơ sở y tế cụ thể đó.
 
 ### 11. Kế hoạch chạy thử và dự toán chi phí
 
@@ -572,5 +782,26 @@ Sau phần này, viết thêm 2-4 câu ngắn:
 - với quy mô này chi phí tổng rơi vào khoảng nào,
 - expert chiếm khoảng bao nhiêu giờ,
 - và vì sao plan này đủ để chứng minh case có thể pilot an toàn.
+
+---
+
+**Giả định giá API:**
+- Model judge: Claude Haiku 4.5 — $0.80/M input tokens, $4.00/M output tokens (nguồn: trang giá Anthropic, tháng 6/2026)
+- Mỗi call: cần pass cả transcript + hồ sơ tra cứu + output AI ~1,200 input + 300 output ≈ $0.00096 + $0.00120 = **$0.00216/call**
+
+**Quy mô pilot:**
+- 75 cases × 40 lần chạy (iterate judge prompt + re-run sau mỗi lần điều chỉnh taxonomy) = **3,000 total calls**
+- Chi phí API: 3,000 × $0.00216 ≈ **~$6.48**
+
+**Giờ công:**
+- PM / thiết kế eval: 5h (thiết kế taxonomy route cùng expert, viết judge prompt cho red flag detection)
+- Ops / kỹ thuật: 7h (build mock transcript data, eval harness, chạy batch và debug)
+- Human review (tổng đài viên): 3h (xem lại output AI trên 75 cases)
+- **Domain expert (bác sĩ/điều dưỡng): 8h** (review 75 cases để xác nhận taxonomy route + tiêu chí red flag)
+- **Tổng: ~23h**
+
+**Tổng chi phí pilot:** ~$6–7 (API) + ~23h nhân công (trong đó 8h là giờ chuyên môn y tế — chi phí lớn nhất).
+
+Giá API lấy từ trang pricing chính thức của Anthropic cho Claude Haiku 4.5. Chi phí API vẫn dưới $10, nhưng chi phí thực tế của pilot này chủ yếu đến từ 8h giờ chuyên môn bác sĩ/điều dưỡng — đây là chi phí không thể cắt bỏ trong bối cảnh y tế. Expert chiếm khoảng 35% tổng giờ công nhưng là điều kiện bắt buộc để release: nếu không có expert duyệt taxonomy, team không có cơ sở nào để nói "hệ thống này an toàn để dùng với bệnh nhân thật."
 
 ---
